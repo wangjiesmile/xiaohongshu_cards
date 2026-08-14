@@ -1,0 +1,4 @@
+interface:
+  display_name: "Xiaohongshu Cards"
+  short_description: "把个人 IP 和 Markdown 长文制作成小红书知识卡片"
+  default_prompt: "使用 $xiaohongshu-cards 把我的个人 IP 和 Markdown 文章制作成一套小红书知识卡片。"
