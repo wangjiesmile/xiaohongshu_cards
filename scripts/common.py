@@ -11,7 +11,17 @@ from typing import Any
 
 HEX_COLOR = re.compile(r"^#[0-9A-Fa-f]{6}$")
 SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
-BLOCK_TYPES = {"paragraph", "highlight", "bullet", "code", "image"}
+BLOCK_TYPES = {
+    "paragraph",
+    "highlight",
+    "section",
+    "item",
+    "bullet",
+    "code",
+    "image",
+    "note",
+    "spacer",
+}
 
 
 class InputError(ValueError):
@@ -41,6 +51,16 @@ def require_text(value: Any, field: str, *, limit: int = 1000) -> str:
     if len(text) > limit:
         raise InputError(f"{field} 不能超过 {limit} 个字符")
     return text
+
+
+def bounded_int(value: Any, field: str, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise InputError(f"{field} 必须是整数")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise InputError(f"{field} 必须是整数") from exc
+    return max(minimum, min(maximum, number))
 
 
 def resolve_inside(base: Path, raw_path: str, field: str) -> Path:
@@ -85,8 +105,11 @@ def validate_profile(data: Any, *, base: Path) -> dict[str, Any]:
     }
 
 
-def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
-    if not isinstance(data, dict) or data.get("version") != 1:
+def validate_project(data: Any, *, base: Path, allow_empty: bool = False) -> dict[str, Any]:
+    if not isinstance(data, dict):
+        raise InputError("项目数据必须是 JSON 对象")
+    modern = "cards" in data
+    if data.get("version", 1) != 1:
         raise InputError("project.version 必须为 1")
     cover = data.get("cover")
     if not isinstance(cover, dict):
@@ -97,10 +120,13 @@ def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
     illustration = resolve_inside(base, illustration_raw, "cover.illustration")
     if not illustration.is_file():
         raise InputError(f"封面插图不存在: {illustration}")
+    cover_status = cover.get("status", "draft" if modern else "confirmed")
+    if cover_status not in {"draft", "confirmed"}:
+        raise InputError("cover.status 必须是 draft 或 confirmed")
 
-    pages = data.get("pages")
-    if not isinstance(pages, list) or not pages:
-        raise InputError("project.pages 必须是非空数组")
+    pages = data.get("cards") if modern else data.get("pages")
+    if not isinstance(pages, list) or (not pages and not allow_empty):
+        raise InputError("project.cards 必须是非空数组")
     normalized_pages: list[dict[str, Any]] = []
     for page_index, page in enumerate(pages, start=1):
         if not isinstance(page, dict):
@@ -112,9 +138,10 @@ def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
         image_count = 0
         for block_index, block in enumerate(blocks, start=1):
             field = f"pages[{page_index}].blocks[{block_index}]"
-            if not isinstance(block, dict) or block.get("type") not in BLOCK_TYPES:
+            block_type_value = block.get("kind") if modern else block.get("type")
+            if not isinstance(block, dict) or block_type_value not in BLOCK_TYPES:
                 raise InputError(f"{field}.type 不受支持")
-            block_type = str(block["type"])
+            block_type = str(block_type_value)
             if block_type == "image":
                 image_count += 1
                 raw = require_text(block.get("path"), f"{field}.path", limit=500)
@@ -126,7 +153,19 @@ def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
                         "type": block_type,
                         "path": raw,
                         "caption": str(block.get("caption", "")).strip()[:160],
+                        "height": bounded_int(block.get("height", 360), f"{field}.height", 220, 520),
                     }
+                )
+            elif block_type == "spacer":
+                normalized_blocks.append(
+                    {"type": block_type, "height": bounded_int(block.get("height", 20), f"{field}.height", 8, 80)}
+                )
+            elif block_type == "item":
+                title = require_text(block.get("title"), f"{field}.title", limit=120)
+                body = require_text(block.get("body"), f"{field}.body", limit=1000)
+                number = str(block.get("number", "")).strip()[:12]
+                normalized_blocks.append(
+                    {"type": block_type, "number": number, "title": title, "body": body}
                 )
             else:
                 normalized_blocks.append(
@@ -142,7 +181,9 @@ def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
         normalized_pages.append(
             {
                 "kicker": require_text(
-                    page.get("kicker"), f"pages[{page_index}].kicker", limit=30
+                    page.get("eyebrow") if modern else page.get("kicker"),
+                    f"pages[{page_index}].kicker",
+                    limit=50,
                 ),
                 "title": require_text(
                     page.get("title"), f"pages[{page_index}].title", limit=80
@@ -155,6 +196,9 @@ def validate_project(data: Any, *, base: Path) -> dict[str, Any]:
         "cover": {
             "title": require_text(cover.get("title"), "cover.title", limit=40),
             "illustration": illustration_raw,
+            "status": cover_status,
         },
+        "series_title": str(data.get("seriesTitle", cover.get("title", ""))).strip()[:80],
+        "handle": str(data.get("handle", "")).strip()[:80],
         "pages": normalized_pages,
     }

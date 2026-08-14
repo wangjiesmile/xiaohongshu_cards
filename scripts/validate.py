@@ -21,6 +21,13 @@ def validate_copy(path: Path) -> None:
         text = path.read_text(encoding="utf-8")
     except FileNotFoundError as exc:
         raise InputError(f"发布文案不存在: {path}") from exc
+    if re.search(r"^#[ \t]+推荐标题[ \t]*$", text, re.MULTILINE) and re.search(
+        r"^#[ \t]+正文[ \t]*$", text, re.MULTILINE
+    ) and re.search(r"^#[ \t]+Tags[ \t]*$", text, re.MULTILINE | re.IGNORECASE):
+        topic_count = len(re.findall(r"(?<!\w)#[^#\s]+", text.split("Tags", 1)[-1]))
+        if not 6 <= topic_count <= 10:
+            raise InputError("Tags 必须为六至十个")
+        return
     positions: list[int] = []
     for section in SECTIONS:
         match = re.search(rf"^##[ \t]+{re.escape(section)}[ \t]*$", text, re.MULTILINE)
@@ -59,8 +66,10 @@ def validate_png(path: Path) -> None:
 
 def validate_all(project_path: Path, output: Path, copy_path: Path) -> list[Path]:
     project = validate_project(read_json(project_path), base=project_path.parent)
+    if project["cover"]["status"] != "confirmed":
+        raise InputError("封面尚未确认")
     expected = [output / "cover.png"] + [
-        output / f"page-{index:02d}.png" for index in range(1, len(project["pages"]) + 1)
+        output / f"card-{index:02d}.png" for index in range(1, len(project["pages"]) + 1)
     ]
     actual = sorted(output.glob("*.png")) if output.is_dir() else []
     if set(actual) != set(expected):
@@ -69,8 +78,42 @@ def validate_all(project_path: Path, output: Path, copy_path: Path) -> list[Path
         raise InputError(f"渲染文件不匹配；缺少 {missing or '无'}；多出 {extra or '无'}")
     for path in expected:
         validate_png(path)
+    referenced = {
+        resolve_image(project_path.parent, block["path"])
+        for page in project["pages"]
+        for block in page["blocks"]
+        if block["type"] == "image"
+    }
+    manifest_path = project_path.parent / "assets" / "article-images" / "manifest.json"
+    if manifest_path.is_file():
+        manifest = read_json(manifest_path)
+        items = manifest.get("images") if isinstance(manifest, dict) else manifest
+        if not isinstance(items, list):
+            raise InputError("关键图 manifest 必须是数组或包含 images 数组")
+        for item in items:
+            if not isinstance(item, dict):
+                raise InputError("关键图 manifest 项必须是对象")
+            raw = item.get("output") or item.get("file")
+            if not isinstance(raw, str) or not raw.strip():
+                raise InputError("关键图 manifest 缺少 output")
+            candidate = Path(raw)
+            selected = candidate.resolve() if candidate.is_absolute() else (manifest_path.parent / candidate).resolve()
+            if selected not in referenced:
+                raise InputError(f"选中的关键图没有进入卡片: {selected}")
     validate_copy(copy_path)
     return expected
+
+
+def resolve_image(base: Path, raw: str) -> Path:
+    candidate = Path(raw)
+    if candidate.is_absolute():
+        return candidate.resolve()
+    target = (base.resolve() / candidate).resolve()
+    try:
+        target.relative_to(base.resolve())
+    except ValueError as exc:
+        raise InputError("正文图片路径越界") from exc
+    return target
 
 
 def main() -> int:
